@@ -62,7 +62,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
         model, columns, bound_constraints, affine_constraints
     )
     x = vcat(value.(all_variables(model)), value.(affine_constraints))
-    basis = basis_status .== MOI.BASIC
+    basis = basis_status .== Ref(MOI.BASIC)
     B = A[:, basis]
     @assert size(B, 1) == size(B, 2)
     is_min = objective_sense(model) == MOI.MIN_SENSE

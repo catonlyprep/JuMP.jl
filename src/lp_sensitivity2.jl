@@ -5,6 +5,11 @@
 
 import SparseArrays
 
+"""
+    SensitivityReport
+
+See [`lp_sensitivity`](@ref).
+"""
 struct SensitivityReport
     rhs::Dict{ConstraintRef, Tuple{Float64, Float64}}
     objective::Dict{VariableRef, Tuple{Float64, Float64}}
@@ -14,16 +19,28 @@ Base.getindex(s::SensitivityReport, c::ConstraintRef) = s.rhs[c]
 Base.getindex(s::SensitivityReport, x::VariableRef) = s.objective[x]
 
 """
-    lp_sensitivity(model::Model)::SensitivityReport
+    lp_sensitivity(model::Model; atol::Float64 = 1e-8)::SensitivityReport
 
 Given a linear program `model` containing a current optimal basis, return a
-`SensitivityReport` object, which maps:
+[`SensitivityReport`](@ref) object, which maps:
 
  - every constraint reference to a range over which the right-hand side of the
     corresponding constraint can vary such that the basis remains optimal.
+    ```julia
+    model = lp_sensitivity(model)
+    dRHS_lo, dRHS_hi = model[c]
+    ```
+    Note: interval constraints are NOT supported.
 
  - every variable reference to a range over which the objective coefficient of
     the corresponding variable can vary such that the basis remains optimal.
+    ```julia
+    model = lp_sensitivity(model)
+    dx_lo, dx_hi = model[x]
+    ```
+
+`atol` is the primal/dual optimality tolerance, and should match the tolerance
+of the solver use to compute the basis.
 """
 function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
     if !_is_lp(model)

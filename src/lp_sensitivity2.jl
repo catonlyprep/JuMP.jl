@@ -4,6 +4,7 @@
 #  file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import SparseArrays
+import LinearAlgebra
 
 """
     SensitivityReport
@@ -67,8 +68,12 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     @assert size(B, 1) == size(B, 2)
     is_min = objective_sense(model) == MOI.MIN_SENSE
 
+    B_fact = LinearAlgebra.factorize(B)
     d = Dict{Int, Vector{Float64}}(
-        j => B \ collect(A[:, j]) for j = 1:length(basis) if basis[j] == false
+        # We call `collect` here because some Julia versions missing sparse
+        # matrix \ sparse vector fallbacks.
+        j => B_fact \ collect(A[:, j])
+        for j = 1:length(basis) if basis[j] == false
     )
 
     ###

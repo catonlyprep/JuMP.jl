@@ -49,9 +49,9 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
             "program (or it contains interval constraints)."
         )
     elseif !has_values(model)
-        error("Unable to compute LP sensitivity no primal solution available.")
+        error("Unable to compute LP sensitivity: no primal solution available.")
     elseif !has_duals(model)
-        error("Unable to compute LP sensitivity no dual solution available.")
+        error("Unable to compute LP sensitivity: no dual solution available.")
     end
     columns = Dict(var => i for (i, var) in enumerate(all_variables(model)))
     n = length(columns)
@@ -74,10 +74,9 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
     # There is an easy case to consider:
     #   1) A constraint is basic, so we can just take the distance between the
     #       value of the constraint and the corresponding bound.
-    # Otherwise, we need to compute a search direction as in _search_direction
-    #   and _compute_rhs_range. However, we have to be careful with doubly-
-    # bounded variables, because our computed range doesn't take into account
-    # the inactive bound.
+    # Otherwise, we need to compute a search direction as in _compute_rhs_range.
+    # However, we have to be careful with doubly-bounded variables, because our
+    # computed range doesn't take into account the inactive bound.
 
     rhs_output = Dict{ConstraintRef, Tuple{Float64, Float64}}()
     for (i, con) in enumerate(affine_constraints)
@@ -91,9 +90,8 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
                 rhs_output[con] = (0.0, 0.0)
             end
         else
-            d = _search_direction(A, B, n + i)
             rhs_output[con] = @views _compute_rhs_range(
-                d, x[basis], l[basis], u[basis], atol
+                A, B, i + n, x[basis], l[basis], u[basis], atol
             )
         end
     end
@@ -109,9 +107,8 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
                 rhs_output[con] = (0.0, 0.0)
             end
         else
-            d = _search_direction(A, B, i)
             t_lo, t_hi = @views _compute_rhs_range(
-                d, x[basis], l[basis], u[basis], atol
+                A, B, i, x[basis], l[basis], u[basis], atol
             )
             if basis_status[i] == MOI.NONBASIC_AT_UPPER
                 if set isa MOI.LessThan
@@ -133,29 +130,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
     ###
     ### Compute objective sensitivity
     ###
-    #
-    # Given an optimal basis B, the reduced costs are:
-    #
-    #     c_bar = π = c_N - c_Bᵀ(B⁻¹N)
-    #
-    # Case 1) we are minimizing and variable `i` is nonbasic at lower bound, or
-    #   we are maximizing and variable `i` is nonbasic at upper bound:
-    #   - (δ⁻, δ⁺) = (-πᵢ, ∞) because increasing the objective coefficient will
-    #     only keep it at the bound.
-    # Case 2) variable is nonbasic with nonfixed bounds:
-    #   - The reverse of Case 1). Variable is at the opposite bound.
-    #   - (δ⁻, δ⁺) = (-∞, -πᵢ)
-    # Case 3) variable is nonbasic with fixed bounds:
-    #   - (δ⁻, δ⁺) = (-∞, ∞) because the variable can be effectively
-    #     substituted out.
-    # Case 4) variable `i` is basic.
-    #   - We want to find a δ such that (if minimizing):
-    #       c_N - (c_B + δeᵢ)ᵀ(B⁻¹N) ≥ 0
-    #       c_N - c_BᵀB⁻¹N - δ(eᵢ)ᵀ(B⁻¹N) ≥ 0
-    #       π_N - δ * (eᵢ)ᵀ(B⁻¹N) ≥ 0
-    #     To do so, we can loop through every nonbasic variable `j`, and compute
-    #       dᵢⱼ = (eᵢ)ᵀB⁻¹aⱼ
-    #     Then, depending on the sign of dᵢⱼ, we can compute bounds on δ.
+
     π = vcat(
         reduced_cost.(all_variables(model)),
         (is_min ? 1.0 : -1.0) .* dual.(affine_constraints)
@@ -166,29 +141,67 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
     obj_output = Dict{VariableRef, Tuple{Float64, Float64}}()
     for (i, var) in enumerate(all_variables(model))
         if basis_status[i] == MOI.NONBASIC_AT_LOWER && is_min
-            obj_output[var] = (-π[i], Inf)   # Case 1)
+            # We are minimizing and variable `i` is nonbasic at lower bound.
+            # (δ⁻, δ⁺) = (-πᵢ, ∞) because increasing the objective coefficient
+            # will only keep it at the bound.
+            obj_output[var] = (-π[i], Inf)
         elseif basis_status[i] == MOI.NONBASIC_AT_UPPER && !is_min
-            obj_output[var] = (-π[i], Inf)   # Case 1)
+            # We are maximizing and variable `i` is nonbasic at upper bound.
+            # (δ⁻, δ⁺) = (-πᵢ, ∞) because increasing the objective coefficient
+            # will only keep it at the bound.
+            obj_output[var] = (-π[i], Inf)
         elseif basis_status[i] != MOI.BASIC && l[i] < u[i]
-            obj_output[var] = (-Inf, -π[i])  # Case 2)
+            # The variable is nonbasic with nonfixed bounds. This is the
+            # reverse of the above two cases because the ariable is at the
+            # opposite bound
+            obj_output[var] = (-Inf, -π[i])
         elseif basis_status[i] != MOI.BASIC
-            obj_output[var] = (-Inf, Inf)    # Case 3)
+            # The variable is nonbasic with fixed bounds. Therefore, (δ⁻, δ⁺) =
+            # (-∞, ∞) because the variable can be effectively substituted out.
+            # TODO(odow): is this correct?
+            obj_output[var] = (-Inf, Inf)
         else
-            @assert basis_status[i] == MOI.BASIC  # Case 4)
+            # The variable `i` is basic. Given an optimal basis B, the reduced
+            # costs are:
+            #   c_bar = π = c_N - c_Bᵀ(B⁻¹N)
+            # To maintain optimality, we want to find a δ such that (if
+            # minimizing):
+            #     c_N - (c_B + δeᵢ)ᵀ(B⁻¹N) ≥ 0
+            #     c_N - c_BᵀB⁻¹N - δ(eᵢ)ᵀ(B⁻¹N) ≥ 0
+            #     π_N ≥ δ * (eᵢ)ᵀ(B⁻¹N)
+            # To do so, we can loop through every nonbasic variable `j`, and
+            # compute
+            #     dᵢⱼ = (eᵢ)ᵀB⁻¹aⱼ
+            # Then, depending on the sign of dᵢⱼ, we can compute bounds on δ.
+            @assert basis_status[i] == MOI.BASIC
             t_lo, t_hi = -Inf, Inf
             e_i = sum(basis[ii] for ii = 1:i)
             for j = 1:length(basis)
-                if basis[j] || isapprox(l[j], u[j]; atol = atol) || abs(d[j][e_i]) <= atol
+                if basis[j]
+                    continue  # Nonbasic elements are handled above.
+                elseif isapprox(l[j], u[j]; atol = atol)
+                    # Variable is basic but fixed, doesn't need to be accounted
+                    # for.
                     continue
+                elseif abs(d[j][e_i]) <= atol
+                    continue  # Direction is ≈0 so any value of δ is okay.
                 end
-                in_lb = isequal(
-                    d[j][e_i] > atol,
-                    basis_status[j] == MOI.NONBASIC_AT_UPPER
+                # There are three confusing sign switch opportunities. We
+                # usually want to be:
+                # - minimizing (switch if maximizing)
+                # - with d[j][e_i] ≥ 0 (switch if ≤ 0)
+                # - and nonbasic at the upper bound (switch if lower)
+                # If an even number of these switches have occured, then the
+                # ratio forms an upper bound for δ. Otherwise, it forms a lower
+                # bound.
+                if iseven(
+                    is_min +
+                    (d[j][e_i] > atol) +
+                    (basis_status[j] == MOI.NONBASIC_AT_UPPER)
                 )
-                if is_min == in_lb
-                    t_lo = max(t_lo, π[j] / d[j][e_i])
-                else
                     t_hi = min(t_hi, π[j] / d[j][e_i])
+                else
+                    t_lo = max(t_lo, π[j] / d[j][e_i])
                 end
             end
             obj_output[var] = (t_lo, t_hi)
@@ -199,9 +212,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
 end
 
 """
-    _search_direction(A, B, i, is_variable)
-
-Compute a search direction based on the bound that is changing.
+    _compute_rhs_range(A, B, i, d_B, x_B, l_B, u_B)
 
 Assume we start with the optimal solution `x_old`, we want to compute a step
 size `t` in a direction `d` such that `x_new = x_old + t * d` is still
@@ -209,8 +220,8 @@ represented by the same optimal basis. This can be computed a la primal simplex
 where we use an artificial entering variable.
 
     A * x_new = A * (x_old + t * d)
-              = A * x_old + t * A * d
-              = 0         + t * A * d  # Since A * x_old = 0
+                = A * x_old + t * A * d
+                = 0         + t * A * d  # Since A * x_old = 0
     =>  A * d = 0
     => B * d_B + N * d_N = 0
     => d_B = B \\ -(N * d_N)
@@ -228,22 +239,20 @@ If `!is_variable`, then we are increasing the bounds associated with the `i`th
 affine constraint. Therefore, our artificial entering variable is a duplicate of
 the slack variable associated with the `i`th constraint, i.e., a `-1` in the
 `i`th row and zeros everywhere else.
-"""
-_search_direction(A, B, i) = -(B \ collect(A[:, i]))
 
-"""
-    _compute_rhs_range(d_B, x_B, l_B, u_B)
+In either case:
 
-In `_search_direction`, we computed a direction such that
-`x_new = x_old + t * d`. By ensuring that `A * d = 0`, we maintained structural
-feasibility. Now we need to compute bounds on `t` such that `x_new` maintains
-bound feasibility. That is, compute bounds on t such that:
+    d_B = -(B \\ A[:, i])
+
+Now, having computed a direction such that `x_new = x_old + t * d`. By ensuring
+that `A * d = 0`, we maintained structural feasibility. Now we need to compute
+bounds on `t` such that `x_new` maintains bound feasibility. That is, compute
+bounds on t such that:
 
     l_B[j] <= x_B[j] + t * d_B[j] <= u_B[j].
-
-See also: `_search_direction`.
 """
-function _compute_rhs_range(d_B, x_B, l_B, u_B, atol)
+function _compute_rhs_range(A, B, i, x_B, l_B, u_B, atol)
+    d_B = -(B \ collect(A[:, i]))  # We call `collect` because `A` is sparse.
     t_lo, t_hi = -Inf, Inf
     for j = 1:length(l_B)
         if d_B[j] > atol

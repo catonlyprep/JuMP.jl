@@ -67,6 +67,10 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     @assert size(B, 1) == size(B, 2)
     is_min = objective_sense(model) == MOI.MIN_SENSE
 
+    d = Dict{Int, Vector{Float64}}(
+        j => B \ collect(A[:, j]) for j = 1:length(basis) if basis[j] == false
+    )
+
     ###
     ### Compute RHS sensitivity
     ###
@@ -74,9 +78,10 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     # There is an easy case to consider: a constraint is basic, so we can just
     # take the distance between the value of the constraint and the
     # corresponding bound. Otherwise, we need to compute a search direction as
-    # in `_compute_rhs_range`. However, we have to be careful with
-    # doubly-bounded variables, because our computed range doesn't take into
-    # account the inactive bound.
+    # in `_compute_rhs_range`. This is just the negative of the search direction
+    # computed above. Moreover, we have to be careful with doubly-bounded
+    # variables, because our computed range doesn't take into account the
+    # inactive bound.
 
     rhs_output = Dict{ConstraintRef, Tuple{Float64, Float64}}()
     for (i, con) in enumerate(affine_constraints)
@@ -85,7 +90,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             rhs_output[con] = _basic_range(con, set)
         else
             rhs_output[con] = @views _compute_rhs_range(
-                A, B, i + n, x[basis], l[basis], u[basis], atol
+                -d[i + n], x[basis], l[basis], u[basis], atol
             )
         end
     end
@@ -96,7 +101,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
         else
             col = columns[constraint_object(con).func]
             t_lo, t_hi = @views _compute_rhs_range(
-                A, B, col, x[basis], l[basis], u[basis], atol
+                -d[col], x[basis], l[basis], u[basis], atol
             )
             if bound_status[i] == MOI.NONBASIC_AT_UPPER
                 t_lo = max(t_lo, l[col] - x[col])
@@ -114,9 +119,6 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     π = vcat(
         reduced_cost.(all_variables(model)),
         (is_min ? 1.0 : -1.0) .* dual.(affine_constraints)
-    )
-    d = Dict{Int, Vector{Float64}}(
-        j => B \ collect(A[:, j]) for j = 1:length(basis) if basis[j] == false
     )
     obj_output = Dict{VariableRef, Tuple{Float64, Float64}}()
     for (i, var) in enumerate(all_variables(model))
@@ -172,7 +174,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
                 # - minimizing (switch if maximizing)
                 # - with d[j][e_i] ≥ 0 (switch if ≤ 0)
                 # - and nonbasic at the lower bound (switch if upper)
-                # If an odd number of these switches is true, then the ratio
+                # If an odd number of these things is true, then the ratio
                 # forms an upper bound for δ. Otherwise, it forms a lower bound.
                 st = j <= n ? variable_status[j] : affine_status[j - n]
                 if isodd(
@@ -195,7 +197,7 @@ _basic_range(con, set::MOI.GreaterThan) = (-Inf, value(con) - set.lower)
 _basic_range(con, set) = (0.0, 0.0)
 
 """
-    _compute_rhs_range(A, B, i, x_B, l_B, u_B, atol)
+    _compute_rhs_range(d_B, x_B, l_B, u_B, atol)
 
 Assume we start with the optimal solution `x_old`, we want to compute a step
 size `t` in a direction `d` such that `x_new = x_old + t * d` is still
@@ -234,8 +236,7 @@ bounds on t such that:
 
     l_B[j] <= x_B[j] + t * d_B[j] <= u_B[j].
 """
-function _compute_rhs_range(A, B, i, x_B, l_B, u_B, atol)
-    d_B = -(B \ collect(A[:, i]))  # We call `collect` because `A` is sparse.
+function _compute_rhs_range(d_B, x_B, l_B, u_B, atol)
     t_lo, t_hi = -Inf, Inf
     for j = 1:length(l_B)
         if d_B[j] > atol
@@ -355,9 +356,7 @@ function _fill_standard_form(
     for c in all_constraints(model, F, S)
         push!(affine_constraints, c)
         c_obj = constraint_object(c)
-        if !iszero(c_obj.func.constant)
-            error("Constraint constant not zero.")
-        end
+        @assert iszero(c_obj.func.constant)
         row = length(r_l) + 1
         set = MOI.Interval(c_obj.set)
         push!(r_l, set.lower)
@@ -393,6 +392,7 @@ function _standard_form_basis(
             status = _convert_nonbasic_status(constraint_object(c).set)
         end
         if status != MOI.BASIC
+            @assert variable_basis_status[x[c_obj.func]] == MOI.BASIC
             variable_basis_status[x[c_obj.func]] = status
         end
         bound_basis_status[i] = status

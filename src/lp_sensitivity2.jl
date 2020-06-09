@@ -42,7 +42,7 @@ Given a linear program `model` containing a current optimal basis, return a
 `atol` is the primal/dual optimality tolerance, and should match the tolerance
 of the solver use to compute the basis.
 """
-function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
+function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     if !_is_lp(model)
         error(
             "Unable to compute LP sensitivity because model is not a linear " *
@@ -70,13 +70,13 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
     ###
     ### Compute RHS sensitivity
     ###
-    #
-    # There is an easy case to consider:
-    #   1) A constraint is basic, so we can just take the distance between the
-    #       value of the constraint and the corresponding bound.
-    # Otherwise, we need to compute a search direction as in _compute_rhs_range.
-    # However, we have to be careful with doubly-bounded variables, because our
-    # computed range doesn't take into account the inactive bound.
+
+    # There is an easy case to consider: a constraint is basic, so we can just
+    # take the distance between the value of the constraint and the
+    # corresponding bound. Otherwise, we need to compute a search direction as
+    # in `_compute_rhs_range`. However, we have to be careful with
+    # doubly-bounded variables, because our computed range doesn't take into
+    # account the inactive bound.
 
     rhs_output = Dict{ConstraintRef, Tuple{Float64, Float64}}()
     for (i, con) in enumerate(affine_constraints)
@@ -99,17 +99,9 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
                 A, B, col, x[basis], l[basis], u[basis], atol
             )
             if bound_status[i] == MOI.NONBASIC_AT_UPPER
-                if set isa MOI.LessThan
-                    t_lo = max(t_lo, l[col] - x[col])
-                elseif set isa MOI.GreaterThan
-                    t_hi = u[col] - l[col]
-                end
+                t_lo = max(t_lo, l[col] - x[col])
             elseif bound_status[i] == MOI.NONBASIC_AT_LOWER
-                if set isa MOI.LessThan
-                    t_lo = l[col] - u[col]
-                elseif set isa MOI.GreaterThan
-                    t_hi = min(t_hi, u[col] - x[col])
-                end
+                t_hi = min(t_hi, u[col] - x[col])
             end
             rhs_output[con] = (t_lo, t_hi)
         end
@@ -181,15 +173,14 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-6)
                 # usually want to be:
                 # - minimizing (switch if maximizing)
                 # - with d[j][e_i] ≥ 0 (switch if ≤ 0)
-                # - and nonbasic at the upper bound (switch if lower)
-                # If an even number of these switches have occured, then the
-                # ratio forms an upper bound for δ. Otherwise, it forms a lower
-                # bound.
+                # - and nonbasic at the lower bound (switch if upper)
+                # If an odd number of these switches is true, then the ratio
+                # forms an upper bound for δ. Otherwise, it forms a lower bound.
                 status = j <= n ? variable_status[j] : affine_status[j - n]
-                if iseven(
+                if isodd(
                     is_min +
                     (d[j][e_i] > atol) +
-                    (status == MOI.NONBASIC_AT_UPPER)
+                    (status == MOI.NONBASIC_AT_LOWER)
                 )
                     t_hi = min(t_hi, π[j] / d[j][e_i])
                 else
@@ -208,7 +199,7 @@ _basic_range(con, set::MOI.GreaterThan) = (-Inf, value(con) - set.lower)
 _basic_range(con, set) = (0.0, 0.0)
 
 """
-    _compute_rhs_range(A, B, i, d_B, x_B, l_B, u_B)
+    _compute_rhs_range(A, B, i, x_B, l_B, u_B, atol)
 
 Assume we start with the optimal solution `x_old`, we want to compute a step
 size `t` in a direction `d` such that `x_new = x_old + t * d` is still
@@ -258,7 +249,7 @@ function _compute_rhs_range(A, B, i, x_B, l_B, u_B, atol)
             t_hi = min(t_hi, (l_B[j] - x_B[j]) / d_B[j])
             t_lo = max(t_lo, (u_B[j] - x_B[j]) / d_B[j])
         else
-            continue
+            continue  # d_B[j] ≈ 0.0
         end
     end
     return t_lo, t_hi
@@ -268,11 +259,10 @@ end
     _is_lp(model::Model)
 
 Return `true` if `model` is a linear program.
-
-TODO: support Interval constraints.
 """
 function _is_lp(model::Model)
     for (F, S) in list_of_constraint_types(model)
+        # TODO(odow): support Interval constraints.
         if !(S <: Union{MOI.LessThan, MOI.GreaterThan, MOI.EqualTo})
             return false
         elseif !(F <: Union{VariableRef, GenericAffExpr})
@@ -283,9 +273,9 @@ function _is_lp(model::Model)
 end
 
 """
-    _standard_form_matrix(model)
+    _standard_form_matrix(model, columns::Dict{VariableRef, Int})
 
-Given a problem
+Given a problem:
 
     r_l <= Ax <= r_u
     c_l <=  x <= c_u
@@ -294,10 +284,11 @@ Return the standard form:
 
            [A -I] [x, y] = 0
     [c_l, r_l] <= [x, y] <= [c_u, r_u]
+
+`columns` maps the variable references to column indices.
 """
 function _standard_form_matrix(model::Model, columns::Dict{VariableRef, Int})
     n = length(columns)
-    # Initialize storage
     c_l, c_u = fill(-Inf, n), fill(Inf, n)
     r_l, r_u = Float64[], Float64[]
     I, J, V = Int[], Int[], Float64[]
@@ -347,6 +338,7 @@ function _fill_standard_form(
         c_l[i] = max(c_l[i], set.lower)
         c_u[i] = min(c_u[i], set.upper)
     end
+    return
 end
 
 function _fill_standard_form(
@@ -383,7 +375,12 @@ function _fill_standard_form(
         push!(J, length(x) + row)
         push!(V, -1.0)
     end
+    return
 end
+
+_convert_nonbasic_status(::MOI.LessThan) = MOI.NONBASIC_AT_UPPER
+_convert_nonbasic_status(::MOI.GreaterThan) = MOI.NONBASIC_AT_LOWER
+_convert_nonbasic_status(::Any) = MOI.NONBASIC
 
 function _standard_form_basis(
     model::Model,
@@ -396,11 +393,8 @@ function _standard_form_basis(
     for (i, c) in enumerate(bound_constraints)
         c_obj = constraint_object(c)
         status = MOI.get(model, MOI.ConstraintBasisStatus(), c)
-        S = typeof(constraint_object(c).set)
-        if S <: MOI.LessThan && status == MOI.NONBASIC
-            status = MOI.NONBASIC_AT_UPPER
-        elseif S <: MOI.GreaterThan && status == MOI.NONBASIC
-            status = MOI.NONBASIC_AT_LOWER
+        if status == MOI.NONBASIC
+            status = _convert_nonbasic_status(constraint_object(c).set)
         end
         if status != MOI.BASIC
             variable_basis_status[x[c_obj.func]] = status
@@ -410,11 +404,8 @@ function _standard_form_basis(
     affine_basis_status = fill(MOI.BASIC, length(affine_constraints))
     for (i, c) in enumerate(affine_constraints)
         status = MOI.get(model, MOI.ConstraintBasisStatus(), c)
-        S = typeof(constraint_object(c).set)
-        if S <: MOI.LessThan && status == MOI.NONBASIC
-            status = MOI.NONBASIC_AT_UPPER
-        elseif S <: MOI.GreaterThan && status == MOI.NONBASIC
-            status = MOI.NONBASIC_AT_LOWER
+        if status == MOI.NONBASIC
+            status = _convert_nonbasic_status(constraint_object(c).set)
         end
         affine_basis_status[i] = status
     end

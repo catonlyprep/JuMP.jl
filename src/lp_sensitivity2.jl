@@ -161,11 +161,9 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             e_i = sum(basis[ii] for ii = 1:i)
             for j = 1:length(basis)
                 if basis[j]
-                    continue  # Nonbasic elements are handled above.
+                    continue  # Ignore basic components.
                 elseif isapprox(l[j], u[j]; atol = atol)
-                    # Variable is basic but fixed, doesn't need to be accounted
-                    # for.
-                    continue
+                    continue  # Fixed variables can be ignored.
                 elseif abs(d[j][e_i]) <= atol
                     continue  # Direction is ≈0 so any value of δ is okay.
                 end
@@ -176,11 +174,9 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
                 # - and nonbasic at the lower bound (switch if upper)
                 # If an odd number of these switches is true, then the ratio
                 # forms an upper bound for δ. Otherwise, it forms a lower bound.
-                status = j <= n ? variable_status[j] : affine_status[j - n]
+                st = j <= n ? variable_status[j] : affine_status[j - n]
                 if isodd(
-                    is_min +
-                    (d[j][e_i] > atol) +
-                    (status == MOI.NONBASIC_AT_LOWER)
+                    is_min + (d[j][e_i] > atol) + (st == MOI.NONBASIC_AT_LOWER)
                 )
                     t_hi = min(t_hi, π[j] / d[j][e_i])
                 else

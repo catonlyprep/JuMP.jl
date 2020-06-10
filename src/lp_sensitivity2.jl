@@ -54,17 +54,13 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     elseif !has_duals(model)
         error("Unable to compute LP sensitivity: no dual solution available.")
     end
-    columns = Dict(var => i for (i, var) in enumerate(all_variables(model)))
-    n = length(columns)
-    l, u, A, bound_constraints, affine_constraints = _standard_form_matrix(
-        model, columns
-    )
-    variable_status, bound_status, affine_status = _standard_form_basis(
-        model, columns, bound_constraints, affine_constraints
-    )
-    x = vcat(value.(all_variables(model)), value.(affine_constraints))
-    basis = vcat(variable_status, affine_status) .== Ref(MOI.BASIC)
-    B = A[:, basis]
+
+    prob = _standard_form_matrix(model)
+    basis = _standard_form_basis(model, prob)
+    n = length(prob.columns)
+    x = vcat(value.(all_variables(model)), value.(prob.constraints))
+    basic_cols = vcat(basis.variables, basis.constraints) .== Ref(MOI.BASIC)
+    B = prob.A[:, basic_cols]
     @assert size(B, 1) == size(B, 2)
     is_min = objective_sense(model) == MOI.MIN_SENSE
 
@@ -72,8 +68,13 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     d = Dict{Int, Vector{Float64}}(
         # We call `collect` here because some Julia versions missing sparse
         # matrix \ sparse vector fallbacks.
-        j => B_fact \ collect(A[:, j])
-        for j = 1:length(basis) if basis[j] == false
+        j => B_fact \ collect(prob.A[:, j])
+        for j = 1:length(basic_cols) if basic_cols[j] == false
+    )
+
+    report = SensitivityReport(
+        Dict{ConstraintRef, Tuple{Float64, Float64}}(),
+        Dict{VariableRef, Tuple{Float64, Float64}}(),
     )
 
     ###
@@ -88,32 +89,38 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     # variables, because our computed range doesn't take into account the
     # inactive bound.
 
-    rhs_output = Dict{ConstraintRef, Tuple{Float64, Float64}}()
-    for (i, con) in enumerate(affine_constraints)
-        if affine_status[i] == MOI.BASIC
-            set = constraint_object(con).set
-            rhs_output[con] = _basic_range(con, set)
+    for (i, con) in enumerate(prob.constraints)
+        if basis.constraints[i] == MOI.BASIC
+            report.rhs[con] = _basic_range(con, constraint_object(con).set)
         else
-            rhs_output[con] = @views _compute_rhs_range(
-                -d[i + n], x[basis], l[basis], u[basis], atol
+            report.rhs[con] = @views _compute_rhs_range(
+                -d[i + n],
+                x[basic_cols],
+                prob.lower[basic_cols],
+                prob.upper[basic_cols],
+                atol,
             )
         end
     end
-    for (i, con) in enumerate(bound_constraints)
-        set = constraint_object(con).set
-        if bound_status[i] == MOI.BASIC
-            rhs_output[con] = _basic_range(con, set)
+    for (i, con) in enumerate(prob.bounds)
+        con_obj = constraint_object(con)
+        if basis.bounds[i] == MOI.BASIC
+            report.rhs[con] = _basic_range(con, con_obj.set)
         else
-            col = columns[constraint_object(con).func]
+            col = prob.columns[con_obj.func]
             t_lo, t_hi = @views _compute_rhs_range(
-                -d[col], x[basis], l[basis], u[basis], atol
+                -d[col],
+                x[basic_cols],
+                prob.lower[basic_cols],
+                prob.upper[basic_cols],
+                atol,
             )
-            if bound_status[i] == MOI.NONBASIC_AT_UPPER
-                t_lo = max(t_lo, l[col] - x[col])
-            elseif bound_status[i] == MOI.NONBASIC_AT_LOWER
-                t_hi = min(t_hi, u[col] - x[col])
+            if basis.bounds[i] == MOI.NONBASIC_AT_UPPER
+                t_lo = max(t_lo, prob.lower[col] - x[col])
+            elseif basis.bounds[i] == MOI.NONBASIC_AT_LOWER
+                t_hi = min(t_hi, prob.upper[col] - x[col])
             end
-            rhs_output[con] = (t_lo, t_hi)
+            report.rhs[con] = (t_lo, t_hi)
         end
     end
 
@@ -121,35 +128,40 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     ### Compute objective sensitivity
     ###
 
-    π = vcat(
-        reduced_cost.(all_variables(model)),
-        (is_min ? 1.0 : -1.0) .* dual.(affine_constraints)
+    π = Dict{Int, Float64}(
+        i => reduced_cost(var)
+        for (var, i) in prob.columns if basis.variables[i] != MOI.BASIC
     )
-    obj_output = Dict{VariableRef, Tuple{Float64, Float64}}()
-    for (i, var) in enumerate(all_variables(model))
-        if variable_status[i] == MOI.NONBASIC_AT_LOWER && is_min
+    for (i, c) in enumerate(prob.constraints)
+        if basis.constraints[i] != MOI.BASIC
+            π[n + i] = is_min ? dual(c) : -dual(c)
+        end
+    end
+
+    for (var, i) in prob.columns
+        if basis.variables[i] == MOI.NONBASIC_AT_LOWER && is_min
             @assert π[i] > -atol
             # We are minimizing and variable `i` is nonbasic at lower bound.
             # (δ⁻, δ⁺) = (-πᵢ, ∞) because increasing the objective coefficient
             # will only keep it at the bound.
-            obj_output[var] = (-π[i], Inf)
-        elseif variable_status[i] == MOI.NONBASIC_AT_UPPER && !is_min
+            report.objective[var] = (-π[i], Inf)
+        elseif basis.variables[i] == MOI.NONBASIC_AT_UPPER && !is_min
             @assert π[i] > -atol
             # We are maximizing and variable `i` is nonbasic at upper bound.
             # (δ⁻, δ⁺) = (-πᵢ, ∞) because increasing the objective coefficient
             # will only keep it at the bound.
-            obj_output[var] = (-π[i], Inf)
-        elseif variable_status[i] != MOI.BASIC && l[i] < u[i]
+            report.objective[var] = (-π[i], Inf)
+        elseif basis.variables[i] != MOI.BASIC && prob.lower[i] < prob.upper[i]
             @assert π[i] < atol
             # The variable is nonbasic with nonfixed bounds. This is the
             # reverse of the above two cases because the ariable is at the
             # opposite bound
-            obj_output[var] = (-Inf, -π[i])
-        elseif variable_status[i] != MOI.BASIC
+            report.objective[var] = (-Inf, -π[i])
+        elseif basis.variables[i] != MOI.BASIC
             # The variable is nonbasic with fixed bounds. Therefore, (δ⁻, δ⁺) =
             # (-∞, ∞) because the variable can be effectively substituted out.
             # TODO(odow): is this correct?
-            obj_output[var] = (-Inf, Inf)
+            report.objective[var] = (-Inf, Inf)
         else
             # The variable `i` is basic. Given an optimal basis B, the reduced
             # costs are:
@@ -163,13 +175,13 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             # compute
             #     dᵢⱼ = (eᵢ)ᵀB⁻¹aⱼ
             # Then, depending on the sign of dᵢⱼ, we can compute bounds on δ.
-            @assert variable_status[i] == MOI.BASIC
+            @assert basis.variables[i] == MOI.BASIC
             t_lo, t_hi = -Inf, Inf
-            e_i = sum(basis[ii] for ii = 1:i)
-            for j = 1:length(basis)
-                if basis[j]
+            e_i = sum(basic_cols[ii] for ii = 1:i)
+            for j = 1:length(basic_cols)
+                if basic_cols[j]
                     continue  # Ignore basic components.
-                elseif isapprox(l[j], u[j]; atol = atol)
+                elseif isapprox(prob.lower[j], prob.upper[j]; atol = atol)
                     continue  # Fixed variables can be ignored.
                 elseif abs(d[j][e_i]) <= atol
                     continue  # Direction is ≈0 so any value of δ is okay.
@@ -181,7 +193,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
                 # - and nonbasic at the lower bound (switch if upper)
                 # If an odd number of these things is true, then the ratio
                 # forms an upper bound for δ. Otherwise, it forms a lower bound.
-                st = j <= n ? variable_status[j] : affine_status[j - n]
+                st = j <= n ? basis.variables[j] : basis.constraints[j - n]
                 if isodd(
                     is_min + (d[j][e_i] > atol) + (st == MOI.NONBASIC_AT_LOWER)
                 )
@@ -190,11 +202,11 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
                     t_lo = max(t_lo, π[j] / d[j][e_i])
                 end
             end
-            obj_output[var] = (t_lo, t_hi)
+            report.objective[var] = (t_lo, t_hi)
         end
     end
 
-    return SensitivityReport(rhs_output, obj_output)
+    return report
 end
 
 _basic_range(con, set::MOI.LessThan) = (value(con) - set.upper, Inf)
@@ -275,7 +287,7 @@ function _is_lp(model::Model)
 end
 
 """
-    _standard_form_matrix(model, columns::Dict{VariableRef, Int})
+    _standard_form_matrix(model::Model)
 
 Given a problem:
 
@@ -289,7 +301,8 @@ Return the standard form:
 
 `columns` maps the variable references to column indices.
 """
-function _standard_form_matrix(model::Model, columns::Dict{VariableRef, Int})
+function _standard_form_matrix(model::Model)
+    columns = Dict(var => i for (i, var) in enumerate(all_variables(model)))
     n = length(columns)
     c_l, c_u = fill(-Inf, n), fill(Inf, n)
     r_l, r_u = Float64[], Float64[]
@@ -314,7 +327,14 @@ function _standard_form_matrix(model::Model, columns::Dict{VariableRef, Int})
         )
     end
     A = SparseArrays.sparse(I, J, V, length(r_l), n + length(r_l))
-    return vcat(c_l, r_l), vcat(c_u, r_u), A, bound_constraints, affine_constraints
+    return (
+        columns = columns,
+        lower = vcat(c_l, r_l),
+        upper = vcat(c_u, r_u),
+        A = A,
+        bounds = bound_constraints,
+        constraints = affine_constraints,
+    )
 end
 
 function _fill_standard_form(
@@ -382,33 +402,32 @@ _convert_nonbasic_status(::MOI.LessThan) = MOI.NONBASIC_AT_UPPER
 _convert_nonbasic_status(::MOI.GreaterThan) = MOI.NONBASIC_AT_LOWER
 _convert_nonbasic_status(::Any) = MOI.NONBASIC
 
-function _standard_form_basis(
-    model::Model,
-    x::Dict{VariableRef, Int},
-    bound_constraints::Vector{ConstraintRef},
-    affine_constraints::Vector{ConstraintRef},
-)
-    variable_basis_status = fill(MOI.BASIC, length(x))
-    bound_basis_status = fill(MOI.BASIC, length(bound_constraints))
-    for (i, c) in enumerate(bound_constraints)
-        c_obj = constraint_object(c)
+function _standard_form_basis(model::Model, prob)
+    variable_status = fill(MOI.BASIC, length(prob.columns))
+    bound_status = fill(MOI.BASIC, length(prob.bounds))
+    constraint_status = fill(MOI.BASIC, length(prob.constraints))
+    for (i, c) in enumerate(prob.bounds)
         status = MOI.get(model, MOI.ConstraintBasisStatus(), c)
+        c_obj = constraint_object(c)
         if status == MOI.NONBASIC
-            status = _convert_nonbasic_status(constraint_object(c).set)
+            status = _convert_nonbasic_status(c_obj.set)
         end
         if status != MOI.BASIC
-            @assert variable_basis_status[x[c_obj.func]] == MOI.BASIC
-            variable_basis_status[x[c_obj.func]] = status
+            col = prob.columns[c_obj.func]
+            variable_status[col] = status
         end
-        bound_basis_status[i] = status
+        bound_status[i] = status
     end
-    affine_basis_status = fill(MOI.BASIC, length(affine_constraints))
-    for (i, c) in enumerate(affine_constraints)
+    for (i, c) in enumerate(prob.constraints)
         status = MOI.get(model, MOI.ConstraintBasisStatus(), c)
         if status == MOI.NONBASIC
             status = _convert_nonbasic_status(constraint_object(c).set)
         end
-        affine_basis_status[i] = status
+        constraint_status[i] = status
     end
-    return variable_basis_status, bound_basis_status, affine_basis_status
+    return (
+        variables = variable_status,
+        bounds = bound_status,
+        constraints = constraint_status,
+    )
 end

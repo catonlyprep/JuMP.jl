@@ -57,19 +57,23 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
 
     prob = _standard_form_matrix(model)
     basis = _standard_form_basis(model, prob)
-    n = length(prob.columns)
-    x = vcat(value.(all_variables(model)), value.(prob.constraints))
-    basic_cols = vcat(basis.variables, basis.constraints) .== Ref(MOI.BASIC)
-    B = prob.A[:, basic_cols]
+    B = prob.A[:, basis.basic_cols]
     @assert size(B, 1) == size(B, 2)
+
+    n = length(prob.columns)
     is_min = objective_sense(model) == MOI.MIN_SENSE
+
+    x = vcat(value.(all_variables(model)), value.(prob.constraints))
+    x_B = @view x[basis.basic_cols]
+    l_B = @view prob.lower[basis.basic_cols]
+    u_B = @view prob.upper[basis.basic_cols]
 
     B_fact = LinearAlgebra.factorize(B)
     d = Dict{Int, Vector{Float64}}(
-        # We call `collect` here because some Julia versions missing sparse
+        # We call `collect` here because some Julia versions are missing sparse
         # matrix \ sparse vector fallbacks.
         j => B_fact \ collect(prob.A[:, j])
-        for j = 1:length(basic_cols) if basic_cols[j] == false
+        for j = 1:length(basis.basic_cols) if basis.basic_cols[j] == false
     )
 
     report = SensitivityReport(
@@ -93,13 +97,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
         if basis.constraints[i] == MOI.BASIC
             report.rhs[con] = _basic_range(con, constraint_object(con).set)
         else
-            report.rhs[con] = @views _compute_rhs_range(
-                -d[i + n],
-                x[basic_cols],
-                prob.lower[basic_cols],
-                prob.upper[basic_cols],
-                atol,
-            )
+            report.rhs[con] = _compute_rhs_range(-d[i + n], x_B, l_B, u_B, atol)
         end
     end
     for (i, con) in enumerate(prob.bounds)
@@ -108,13 +106,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             report.rhs[con] = _basic_range(con, con_obj.set)
         else
             col = prob.columns[con_obj.func]
-            t_lo, t_hi = @views _compute_rhs_range(
-                -d[col],
-                x[basic_cols],
-                prob.lower[basic_cols],
-                prob.upper[basic_cols],
-                atol,
-            )
+            t_lo, t_hi = _compute_rhs_range(-d[col], x_B, l_B, u_B, atol)
             if basis.bounds[i] == MOI.NONBASIC_AT_UPPER
                 t_lo = max(t_lo, prob.lower[col] - x[col])
             elseif basis.bounds[i] == MOI.NONBASIC_AT_LOWER
@@ -177,9 +169,9 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             # Then, depending on the sign of dᵢⱼ, we can compute bounds on δ.
             @assert basis.variables[i] == MOI.BASIC
             t_lo, t_hi = -Inf, Inf
-            e_i = sum(basic_cols[ii] for ii = 1:i)
-            for j = 1:length(basic_cols)
-                if basic_cols[j]
+            e_i = sum(basis.basic_cols[ii] for ii = 1:i)
+            for j = 1:length(basis.basic_cols)
+                if basis.basic_cols[j]
                     continue  # Ignore basic components.
                 elseif isapprox(prob.lower[j], prob.upper[j]; atol = atol)
                     continue  # Fixed variables can be ignored.
@@ -193,10 +185,8 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
                 # - and nonbasic at the lower bound (switch if upper)
                 # If an odd number of these things is true, then the ratio
                 # forms an upper bound for δ. Otherwise, it forms a lower bound.
-                st = j <= n ? basis.variables[j] : basis.constraints[j - n]
-                if isodd(
-                    is_min + (d[j][e_i] > atol) + (st == MOI.NONBASIC_AT_LOWER)
-                )
+                stat = j <= n ? basis.variables[j] : basis.constraints[j - n]
+                if xor(is_min, d[j][e_i] > atol, stat == MOI.NONBASIC_AT_LOWER)
                     t_hi = min(t_hi, π[j] / d[j][e_i])
                 else
                     t_lo = max(t_lo, π[j] / d[j][e_i])
@@ -233,14 +223,14 @@ because `d_N` is just zeros with a `1` in the component associated with the
 artificial entering variable. Therefore, all that remains is to compute the
 associated column of `N`.
 
-If `is_variable`, then we are increasing the bounds associated with the `i`th
-variable. Therefore, our artificial entering variable is a duplicate of the
-`i`th variable, and `N * d_N = A[:, i]`.
+If we are increasing the bounds associated with the `i`th decision variable,
+then our artificial entering variable is a duplicate of the `i`th variable, and
+`N * d_N = A[:, i]`.
 
-If `!is_variable`, then we are increasing the bounds associated with the `i`th
-affine constraint. Therefore, our artificial entering variable is a duplicate of
-the slack variable associated with the `i`th constraint, i.e., a `-1` in the
-`i`th row and zeros everywhere else.
+If we are increasing the bounds associated with the `i`th affine constraint,
+then our artificial entering variable is a duplicate of the slack variable
+associated with the `i`th constraint, i.e., a `-1` in the `i`th row and zeros
+everywhere else.
 
 In either case:
 
@@ -326,12 +316,11 @@ function _standard_form_matrix(model::Model)
             V,
         )
     end
-    A = SparseArrays.sparse(I, J, V, length(r_l), n + length(r_l))
     return (
         columns = columns,
         lower = vcat(c_l, r_l),
         upper = vcat(c_u, r_u),
-        A = A,
+        A = SparseArrays.sparse(I, J, V, length(r_l), n + length(r_l)),
         bounds = bound_constraints,
         constraints = affine_constraints,
     )
@@ -429,5 +418,6 @@ function _standard_form_basis(model::Model, prob)
         variables = variable_status,
         bounds = bound_status,
         constraints = constraint_status,
+        basic_cols = vcat(variable_status, constraint_status) .== Ref(MOI.BASIC)
     )
 end

@@ -12,8 +12,8 @@ import LinearAlgebra
 See [`lp_sensitivity`](@ref).
 """
 struct SensitivityReport
-    rhs::Dict{ConstraintRef, Tuple{Float64, Float64}}
-    objective::Dict{VariableRef, Tuple{Float64, Float64}}
+    rhs::Dict{ConstraintRef,Tuple{Float64,Float64}}
+    objective::Dict{VariableRef,Tuple{Float64,Float64}}
 end
 
 Base.getindex(s::SensitivityReport, c::ConstraintRef) = s.rhs[c]
@@ -47,7 +47,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     if !_is_lp(model)
         error(
             "Unable to compute LP sensitivity because model is not a linear " *
-            "program (or it contains interval constraints)."
+            "program (or it contains interval constraints).",
         )
     elseif !has_values(model)
         error("Unable to compute LP sensitivity: no primal solution available.")
@@ -69,7 +69,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     u_B = @view std_form.upper[basis.basic_cols]
 
     B_fact = LinearAlgebra.factorize(B)
-    d = Dict{Int, Vector{Float64}}(
+    d = Dict{Int,Vector{Float64}}(
         # We call `collect` here because some Julia versions are missing sparse
         # matrix \ sparse vector fallbacks.
         j => B_fact \ collect(std_form.A[:, j])
@@ -77,8 +77,8 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     )
 
     report = SensitivityReport(
-        Dict{ConstraintRef, Tuple{Float64, Float64}}(),
-        Dict{VariableRef, Tuple{Float64, Float64}}(),
+        Dict{ConstraintRef,Tuple{Float64,Float64}}(),
+        Dict{VariableRef,Tuple{Float64,Float64}}(),
     )
 
     ###
@@ -97,7 +97,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
         if basis.constraints[i] == MOI.BASIC
             report.rhs[con] = _basic_range(con, constraint_object(con).set)
         else
-            report.rhs[con] = _compute_rhs_range(-d[i + n], x_B, l_B, u_B, atol)
+            report.rhs[con] = _compute_rhs_range(-d[i+n], x_B, l_B, u_B, atol)
         end
     end
     for (i, con) in enumerate(std_form.bounds)
@@ -120,13 +120,13 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
     ### Compute objective sensitivity
     ###
 
-    π = Dict{Int, Float64}(
+    π = Dict{Int,Float64}(
         i => reduced_cost(var)
         for (var, i) in std_form.columns if basis.variables[i] != MOI.BASIC
     )
     for (i, c) in enumerate(std_form.constraints)
         if basis.constraints[i] != MOI.BASIC
-            π[n + i] = is_min ? dual(c) : -dual(c)
+            π[n+i] = is_min ? dual(c) : -dual(c)
         end
     end
 
@@ -172,12 +172,14 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             # Then, depending on the sign of dᵢⱼ, we can compute bounds on δ.
             @assert basis.variables[i] == MOI.BASIC
             t_lo, t_hi = -Inf, Inf
-            e_i = sum(basis.basic_cols[ii] for ii = 1:i)
-            for j = 1:length(basis.basic_cols)
+            e_i = sum(basis.basic_cols[ii] for ii in 1:i)
+            for j in 1:length(basis.basic_cols)
                 if basis.basic_cols[j]
                     continue  # Ignore basic components.
                 elseif isapprox(
-                    std_form.lower[j], std_form.upper[j]; atol = atol
+                    std_form.lower[j],
+                    std_form.upper[j];
+                    atol = atol,
                 )
                     continue  # Fixed variables can be ignored.
                 elseif abs(d[j][e_i]) <= atol
@@ -190,7 +192,7 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
                 # - and nonbasic at the lower bound (switch if upper)
                 # If an odd number of these things is true, then the ratio
                 # forms an upper bound for δ. Otherwise, it forms a lower bound.
-                stat = j <= n ? basis.variables[j] : basis.constraints[j - n]
+                stat = j <= n ? basis.variables[j] : basis.constraints[j-n]
                 if xor(is_min, d[j][e_i] > atol, stat == MOI.NONBASIC_AT_LOWER)
                     t_hi = min(t_hi, π[j] / d[j][e_i])
                 else
@@ -250,7 +252,7 @@ bounds on t such that:
 """
 function _compute_rhs_range(d_B, x_B, l_B, u_B, atol)
     t_lo, t_hi = -Inf, Inf
-    for j = 1:length(l_B)
+    for j in 1:length(l_B)
         if d_B[j] > atol
             t_hi = min(t_hi, (u_B[j] - x_B[j]) / d_B[j])
             t_lo = max(t_lo, (l_B[j] - x_B[j]) / d_B[j])
@@ -272,9 +274,9 @@ Return `true` if `model` is a linear program.
 function _is_lp(model::Model)
     for (F, S) in list_of_constraint_types(model)
         # TODO(odow): support Interval constraints.
-        if !(S <: Union{MOI.LessThan, MOI.GreaterThan, MOI.EqualTo})
+        if !(S <: Union{MOI.LessThan,MOI.GreaterThan,MOI.EqualTo})
             return false
-        elseif !(F <: Union{VariableRef, GenericAffExpr})
+        elseif !(F <: Union{VariableRef,GenericAffExpr})
             return false
         end
     end
@@ -333,7 +335,7 @@ end
 
 function _fill_standard_form(
     model::Model,
-    x::Dict{VariableRef, Int},
+    x::Dict{VariableRef,Int},
     bound_constraints::Vector{ConstraintRef},
     ::Vector{ConstraintRef},
     F::Type{VariableRef},
@@ -359,7 +361,7 @@ end
 
 function _fill_standard_form(
     model::Model,
-    x::Dict{VariableRef, Int},
+    x::Dict{VariableRef,Int},
     ::Vector{ConstraintRef},
     affine_constraints::Vector{ConstraintRef},
     F::Type{<:GenericAffExpr},
@@ -423,6 +425,7 @@ function _standard_form_basis(model::Model, std_form)
         variables = variable_status,
         bounds = bound_status,
         constraints = constraint_status,
-        basic_cols = vcat(variable_status, constraint_status) .== Ref(MOI.BASIC)
+        basic_cols = vcat(variable_status, constraint_status) .==
+                     Ref(MOI.BASIC),
     )
 end

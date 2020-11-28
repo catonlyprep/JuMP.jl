@@ -252,11 +252,11 @@ function _compute_rhs_range(d_B, x_B, l_B, u_B, atol)
     t_lo, t_hi = -Inf, Inf
     for j in 1:length(l_B)
         if d_B[j] > atol
-            t_hi = min(t_hi, (u_B[j] - x_B[j]) / d_B[j])
             t_lo = max(t_lo, (l_B[j] - x_B[j]) / d_B[j])
+            t_hi = min(t_hi, (u_B[j] - x_B[j]) / d_B[j])
         elseif d_B[j] < -atol
-            t_hi = min(t_hi, (l_B[j] - x_B[j]) / d_B[j])
             t_lo = max(t_lo, (u_B[j] - x_B[j]) / d_B[j])
+            t_hi = min(t_hi, (l_B[j] - x_B[j]) / d_B[j])
         else
             continue  # d_B[j] ≈ 0.0
         end

@@ -143,10 +143,8 @@ function lp_sensitivity(model::Model; atol::Float64 = 1e-8)
             # (δ⁻, δ⁺) = (-πᵢ, ∞) because increasing the objective coefficient
             # will only keep it at the bound.
             report.objective[var] = (-π[i], Inf)
-        elseif (
-            basis.variables[i] != MOI.BASIC &&
-            std_form.lower[i] < std_form.upper[i]
-        )
+        elseif basis.variables[i] != MOI.BASIC &&
+               std_form.lower[i] < std_form.upper[i]
             @assert π[i] < atol
             # The variable is nonbasic with nonfixed bounds. This is the
             # reverse of the above two cases because the variable is at the
